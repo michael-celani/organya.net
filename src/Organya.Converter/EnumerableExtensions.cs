@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using RangeTree;
 
 namespace Organya.Converter
@@ -15,6 +16,16 @@ namespace Organya.Converter
         /// <returns>A grouping of enumerables split at the predicate.</returns>
         public static IEnumerable<IEnumerable<T>> SplitBefore<T>(this IEnumerable<T> enumerable, Predicate<T> predicate)
         {
+            if (enumerable == null)
+            {
+                throw new ArgumentNullException(nameof(enumerable));
+            }
+
+            if (predicate == null)
+            {
+                throw new ArgumentNullException(nameof(predicate));
+            }
+
             IList<T> buffer = new List<T>();
 
             foreach (T item in enumerable)

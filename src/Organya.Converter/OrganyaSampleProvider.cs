@@ -9,7 +9,7 @@ namespace Organya.Converter
     public class OrganyaSampleProvider : ISampleProvider
     {
         /// <inheritdoc />
-        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(41100, 2);
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(44100, 2);
 
         private Organya Organya { get; }
 
@@ -17,7 +17,7 @@ namespace Organya.Converter
 
         private long SamplesPerClick { get; }
 
-        private long CurrentSample { get; set; }
+        private long CurrentSample { get; set; } = 1;
 
         private bool RightChannel { get; set; }
 
@@ -47,7 +47,7 @@ namespace Organya.Converter
             Organya = organya ?? throw new ArgumentNullException(nameof(organya));
             SamplesPerClick = (long) (WaveFormat.SampleRate * Organya.ClickLength.TotalSeconds);
 
-            IEnumerable<OrganyaNote> notes = OrganyaConverter.Extract(organya, instruments);
+            IEnumerable<OrganyaNote> notes = new OrganyaConverter(instruments).Extract(organya);
             NoteTree = notes.ToRangeTree(note => note.NotePosition, note => note.NotePosition + note.NoteDuration - 1);
         }
 
@@ -63,17 +63,24 @@ namespace Organya.Converter
                     return read;
                 }
 
-                buffer[i + offset] = NoteTree.Query(CurrentClick).Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample));
+                var noteTree = NoteTree.Query(CurrentClick);
+                var a = noteTree.Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample-1));
+                var b = noteTree.Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample));
+                var c = noteTree.Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample+1));
 
+                buffer[i + offset] = b;
+
+                
                 var timeToNext = SamplesPerClick - (CurrentSample % SamplesPerClick);
-                var cutoff = 500f;
+                var cutoff = 400f;
 
                 if (timeToNext < cutoff)
                 {
-                    var next = NoteTree.Query(CurrentClick + 1).Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample));
+                    var next = NoteTree.Query(CurrentClick + 1).Aggregate(0.0f, (sample, note) => sample + GetNoteSample(note, CurrentSample - 1));
 
                     buffer[i + offset] = buffer[i + offset] * timeToNext / cutoff + next * ((cutoff - timeToNext) / cutoff);
                 }
+                
 
                 if (!RightChannel)
                 {
@@ -116,14 +123,27 @@ namespace Organya.Converter
             float waveValue = Convert.ToSingle(note.Instrument.Samples[point]);
             float sampleValue = map(waveValue, sbyte.MinValue, sbyte.MaxValue, -1.0f, 1.0f);
 
+            
             float waveValue2 = Convert.ToSingle(note.Instrument.Samples[(point + 1) % 256]);
             float sampleValue2 = map(waveValue2, sbyte.MinValue, sbyte.MaxValue, -1.0f, 1.0f);
 
             var percentNext = (float)(sampleOffset - Math.Truncate(sampleOffset));
-
+            
             sampleValue = lerp(sampleValue, sampleValue2, percentNext);
+            
 
             float volume = (float)Math.Pow(10, note.Volume.Query(CurrentClick).First() - 1.0);
+
+            var timeToNext = SamplesPerClick - (CurrentSample % SamplesPerClick);
+            var cutoff = 400f;
+
+            if (timeToNext < cutoff)
+            {
+                float volume2 = (float)Math.Pow(10, note.Volume.Query(CurrentClick + 1).First() - 1.0);
+                volume = lerp(volume, volume2, smoothstep((cutoff-timeToNext)/cutoff));
+            }
+
+
 
             var pan = note.Pan.Query(CurrentClick).First();
 
@@ -149,13 +169,18 @@ namespace Organya.Converter
             return (1 - t) * v0 + t * v1;
         }
 
+        float smoothstep(double x)
+        {
+            return (float) (70 * Math.Pow(x, 9) -315 * Math.Pow(x, 8) +540 * Math.Pow(x, 7) - 420 * Math.Pow(x, 6) + 126 * Math.Pow(x, 5));
+        }
+
         public static long GetPointIndex(int octave, long point)
         {
             var index = octave switch
             {
                 0 => point >> 2,
                 1 => point >> 1,
-                2 => (point - point % 2),
+                2 => point - point % 2,
                 3 => (point - point % 2) << 1,
                 4 => (point - point % 2) << 2,
                 5 => (point - point % 2) << 3,

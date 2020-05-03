@@ -1,87 +1,93 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using RangeTree;
 
 namespace Organya.Converter
 {
-    public static class OrganyaConverter
+    public class OrganyaConverter
     {
-        public static IEnumerable<OrganyaNote> Extract(Organya organya, OrganyaInstrument[] instruments)
+        public IReadOnlyList<OrganyaInstrument> Instruments { get; }
+
+        public OrganyaConverter(IEnumerable<OrganyaInstrument> instruments)
         {
-            return organya.Tracks.SelectMany(track => ExtractNotes(track, instruments));
+            Instruments = instruments.ToList().AsReadOnly();
         }
 
-        private static IEnumerable<OrganyaNote> ExtractNotes(OrganyaTrack track, OrganyaInstrument[] instruments)
+        public IEnumerable<OrganyaNote> Extract(Organya organya)
         {
-            return track.Events.SplitBefore(IsNoteStart).Select(noteEvents => ExtractNote(noteEvents, track, instruments));
+            return organya.Tracks.SelectMany(ExtractTrack);
         }
 
-        private static OrganyaNote ExtractNote(IEnumerable<OrganyaEvent> noteEvents, OrganyaTrack track, OrganyaInstrument[] instruments)
+        private IEnumerable<OrganyaNote> ExtractTrack(OrganyaTrack track)
         {
-            OrganyaEvent startingEvent = noteEvents.First();
-            OrganyaEvent endingEvent = noteEvents.Last();
-
-            IRangeTree<uint, float> volumeTree = new RangeTree<uint, float>();
-
-            OrganyaEvent prevEvent = startingEvent;
-            foreach (OrganyaEvent orgEvent in noteEvents.Skip(1))
+            OrganyaNote ExtractTrackNotes(IEnumerable<OrganyaEvent> events)
             {
-                if (orgEvent.Volume == 255)
-                {
-                    continue;
-                }
-
-                // Volume has changed:
-                volumeTree.Add(prevEvent.EventPosition, orgEvent.EventPosition - 1, prevEvent.Volume / 254f);
-                prevEvent = orgEvent;
+                return ExtractNotes(events, track);
             }
 
-            if (endingEvent.EventPosition > startingEvent.EventPosition + startingEvent.Duration)
+            return track.Events.SplitBefore(IsNoteStart).Select(ExtractTrackNotes);
+        }
+
+        private OrganyaNote ExtractNotes(IEnumerable<OrganyaEvent> noteEvents, OrganyaTrack track)
+        {
+            IList<OrganyaEvent> notes = noteEvents.ToList();
+
+            OrganyaEvent firNote = notes[0];
+            OrganyaEvent endNote = notes[^1];
+
+            // It's possible to change the volume of a note after its duration has lapsed.
+            // Percussion can do this to change the volume of a note mid-play without having
+            // to select a range.
+            if (endNote.EventPosition > firNote.EventPosition + firNote.Duration)
             {
-                startingEvent.Duration = (byte) (endingEvent.EventPosition - startingEvent.EventPosition);
+                firNote.Duration = (byte) (endNote.EventPosition - firNote.EventPosition);
             }
-
-            volumeTree.Add(prevEvent.EventPosition, uint.MaxValue, prevEvent.Volume / 254f);
-            volumeTree.Add(0, startingEvent.EventPosition, startingEvent.Volume / 254f);
-
-            IRangeTree<uint, float> panTree = new RangeTree<uint, float>();
-
-            prevEvent = startingEvent;
-            foreach (OrganyaEvent orgEvent in noteEvents.Skip(1))
-            {
-                if (orgEvent.Pan == 255)
-                {
-                    continue;
-                }
-
-                var panVal = prevEvent.Pan / 12.0f;
-
-                // Pan has changed:
-                panTree.Add(prevEvent.EventPosition, orgEvent.EventPosition - 1, panVal);
-                prevEvent = orgEvent;
-            }
-
-            if (endingEvent.EventPosition > startingEvent.EventPosition + startingEvent.Duration)
-            {
-                startingEvent.Duration = (byte)(endingEvent.EventPosition - startingEvent.EventPosition);
-            }
-
-            panTree.Add(prevEvent.EventPosition, uint.MaxValue, (prevEvent.Pan) / 12.0f);
-            panTree.Add(0, startingEvent.EventPosition, (prevEvent.Pan) / 12.0f);
-
 
             return new OrganyaNote
             {
-                NotePosition = startingEvent.EventPosition,
-                NoteDuration = startingEvent.Duration,
+                NotePosition = firNote.EventPosition,
+                NoteDuration = firNote.Duration,
                 Frequency = track.Frequency,
-                Pitch = startingEvent.Pitch,
-                Instrument = instruments[track.Instrument],
-                Volume = volumeTree,
-                Pan = panTree
+                Pitch = firNote.Pitch,
+                Instrument = Instruments[track.Instrument],
+                Volume = ExtractTree(notes, IsVolumeChange, NormalizeVolume),
+                Pan = ExtractTree(notes, IsPanChange, NormalizePan)
             };
         }
 
-        private static bool IsNoteStart(OrganyaEvent ev) => ev.Pitch != 255; 
+        private static IRangeTree<uint, float> ExtractTree(
+            IList<OrganyaEvent> noteEvents,
+            Func<OrganyaEvent, bool> changeFunc,
+            Func<OrganyaEvent, float> normalizeFunc
+        )
+        {
+            IRangeTree<uint, float> tree = new RangeTree<uint, float>();
+
+            OrganyaEvent startingEvent = noteEvents[0];
+            OrganyaEvent prevEvent = startingEvent;
+
+            foreach (OrganyaEvent currEvent in noteEvents.Skip(1).Where(changeFunc))
+            {
+                tree.Add(prevEvent.EventPosition, currEvent.EventPosition - 1, normalizeFunc(prevEvent));
+                prevEvent = currEvent;
+            }
+
+
+            tree.Add(0, startingEvent.EventPosition, normalizeFunc(startingEvent));
+            tree.Add(prevEvent.EventPosition, uint.MaxValue, normalizeFunc(prevEvent));
+
+            return tree;
+        }
+
+        private static bool IsNoteStart(OrganyaEvent ev) => ev.Pitch != 255;
+
+        private static bool IsVolumeChange(OrganyaEvent ev) => ev.Volume != 255;
+
+        private static bool IsPanChange(OrganyaEvent ev) => ev.Pan != 255;
+
+        private static float NormalizeVolume(OrganyaEvent ev) => ev.Volume / 254f;
+
+        private static float NormalizePan(OrganyaEvent ev) => ev.Pan / 12f;
     }
 }
